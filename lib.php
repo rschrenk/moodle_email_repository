@@ -1,4 +1,12 @@
 <?php
+
+// Force a debugging mode regardless the settings in the site administration
+// @error_reporting(1023);  // NOT FOR PRODUCTION SERVERS!
+@ini_set('display_errors', '1'); // NOT FOR PRODUCTION SERVERS!
+$CFG->debug = 32767;         // DEBUG_DEVELOPER // NOT FOR PRODUCTION SERVERS!
+// for Moodle 2.0 - 2.2, use:  $CFG->debug = 38911;  
+$CFG->debugdisplay = true;   // NOT FOR PRODUCTION SERVERS!
+
 // This file is part of Moodle - http://moodle.org/
 //
 // Moodle is free software: you can redistribute it and/or modify
@@ -33,23 +41,27 @@ class repository_emailed_files extends repository {
     public function __construct($repositoryid, $context = SYSCONTEXTID, $options = array()) {
         global $CFG;
         parent::__construct($repositoryid, $context, $options);
+        
+        $this->debug = true;
+        
+        if($this->debug) error_log("Construct");
 
-	$this->host = get_config('emailed_files','host');
-	$this->port = get_config('emailed_files','port');
-	// Enable configuration for other protocols if you want to implement POP3
-	$this->protocol = 'imap'; // get_config('emailed_files','protocol');
-	$this->box = get_config('emailed_files','box');
-	$this->user = get_config('emailed_files','user');
-	$this->pass = get_config('emailed_files','pass');
-	$this->use_ssl = (get_config('emailed_files','use_ssl')==1)?true:false;
-	$this->validate_cert = (get_config('emailed_files','validate_cert')==1)?true:false;
-	$this->purge_age_days = get_config('emailed_files','purge_age_days');
+		$this->host = get_config('emailed_files','host');
+		$this->port = get_config('emailed_files','port');
+		// Enable configuration for other protocols if you want to implement POP3
+		$this->protocol = 'imap'; // get_config('emailed_files','protocol');
+		$this->box = get_config('emailed_files','box');
+		$this->user = get_config('emailed_files','user');
+		$this->pass = get_config('emailed_files','pass');
+		$this->use_ssl = (get_config('emailed_files','use_ssl')==1)?true:false;
+		$this->validate_cert = (get_config('emailed_files','validate_cert')==1)?true:false;
+		$this->purge_age_days = get_config('emailed_files','purge_age_days');
 
-	$this->path = "/service=".$this->protocol;
-	if($this->use_ssl) $this->path .= "/ssl";
-	if($this->use_ssl && !$this->validate_cert) $this->path .= "/novalidate-cert";
+		$this->path = "/service=".$this->protocol;
+		if($this->use_ssl) $this->path .= "/ssl";
+		if($this->use_ssl && !$this->validate_cert) $this->path .= "/novalidate-cert";
 
-	$this->imap = "{".$this->host.":".$this->port.$this->path."}".$this->box;
+		$this->imap = "{".$this->host.":".$this->port.$this->path."}".$this->box;
     }
 
     /**
@@ -62,7 +74,8 @@ class repository_emailed_files extends repository {
         $mailbox = imap_open(imap_utf7_encode($this->imap),$this->user,$this->pass);
         if(!$mailbox)
             throw new moodle_exception('connectionerror', 'repository', $mailbox, '', imap_last_error() );
-	return $mailbox;
+        if($this->debug) error_log("Connected to Mailbox ".$this->imap." using username ".$this->user);
+		return $mailbox;
     }
 
     /**
@@ -73,42 +86,46 @@ class repository_emailed_files extends repository {
      * @return array list of files
      */
     public function get_listing($path = '', $page = '1') {
-	$mailbox = $this->connect_mailbox();
+		$mailbox = $this->connect_mailbox();
 
-	$this->find_emails_for_deletion($mailbox);
-	$emails = $this->find_emails_of_user($mailbox);
-	$files = array();
+		$this->find_emails_for_deletion($mailbox);
+		$emails = $this->find_emails_of_user($mailbox);
+		$files = array();
+		
+		if($this->debug) error_log("Checking ".count($emails)." Emails for Attachments");
 
-	if($emails) {
-		$i = 0;
-		rsort($emails);
-		foreach($emails as $email_number) {
-			$i++;
-			$overview = imap_fetch_overview($mailbox,$email_number,0);
-			$subject = $overview[0]->subject;
-			$date = $overview[0]->date;
+		if(count($emails)>0) {
+			rsort($emails);
+			for($i=0;$i<count($emails);$i++) {
+				$email_number = $emails[$i];
+				$overview = imap_fetch_overview($mailbox,$email_number,0);
+				$subject = $overview[0]->subject;
+				$date = $overview[0]->date;
 
-			$structure = imap_fetchstructure($mailbox, $email_number);
-       			$attachments = $this->read_attachments($structure);
-			if(count($attachments)>0) {
-				for($i=0;$i<count($attachments);$i++) {
-					if($attachments[$i]['is_attachment']) {
-						$z = count($files);
-						$files[$z]["email_number"] = $email_number;
-						$files[$z]["structure_number"] = $i;
-						$files[$z]["subject"] = $subject;
-						$files[$z]["date"] = $date;
-						$files[$z]["size"] = $attachments[$i]["bytes"];
-						$files[$z]["filename"] = $attachments[$i]["filename"];
+				$structure = imap_fetchstructure($mailbox, $email_number);
+				$attachments = $this->read_attachments($structure);
+				if($this->debug) error_log("Structure has ".count($attachments)." Attachments");
+				if(count($attachments)>0) {
+					for($y=0;$y<count($attachments);$y++) {
+						if($attachments[$y]['is_attachment']) {
+							$z = count($files);
+							$files[$z]["email_number"] = $email_number;
+							$files[$z]["structure_number"] = $y;
+							$files[$z]["subject"] = $subject;
+							$files[$z]["date"] = $date;
+							$files[$z]["size"] = $attachments[$y]["bytes"];
+							$files[$z]["filename"] = $attachments[$y]["filename"];
+						}
 					}
 				}
 			}
+			imap_close($mailbox);
+		} else {
+			imap_close($mailbox);
+			return false;
 		}
-		imap_close($mailbox);
-	} else {
-		imap_close($mailbox);
-		return false;
-	}
+		
+		if($this->debug) error_log("In total ".count($files)." Attachments found");
 
         $dirslist = array();
         $fileslist = array();
@@ -142,21 +159,22 @@ class repository_emailed_files extends repository {
      */
     private function find_emails_of_user($mailbox) {
         global $USER;
-	$emails = array();
-	switch($this->protocol) {
-		case "imap":
-			$emails = imap_search($mailbox,"FROM \"".$USER->email."\"",SE_FREE,"UTF8");
-		break;
-		case "pop3":
-			// INFO: POP3 may be implemented, but is not supported for now
-			$allmails = imap_fetch_overview($mailbox,"1:*");
-			foreach($allmails as $mail){
-				if($mail->from==$USER->email || strpos($mail->from,"<".$USER->email.">")>0)
-					$emails[] = $mail->msgno;
-			}
-		break;
-	}
-	return $emails;	
+		$emails = array();
+		switch($this->protocol) {
+			case "imap":
+				$emails = imap_search($mailbox,"FROM \"".$USER->email."\"",SE_FREE,"UTF8");
+			break;
+			case "pop3":
+				// INFO: POP3 may be implemented, but is not supported for now
+				$allmails = imap_fetch_overview($mailbox,"1:*");
+				foreach($allmails as $mail){
+					if($mail->from==$USER->email || strpos($mail->from,"<".$USER->email.">")>0)
+						$emails[] = $mail->msgno;
+				}
+			break;
+		}
+		if($this->debug) error_log("Found ".count($emails)." Emails of user");
+		return $emails;	
     }
     /**
 	Find Mails older than $this->purge_age_days and delete them
@@ -164,29 +182,30 @@ class repository_emailed_files extends repository {
      */
     private function find_emails_for_deletion($mailbox) {
         global $USER;
-	if($this->purge_age_days==0) return;
+		if($this->purge_age_days==0) return;
 
-	$emails = array();
+		$emails = array();
 
-	$del_time = mktime(date("H"),date("i"),date("s"),date("n"),date("j")-$this->purge_age_days,date("Y"));
-	switch($this->protocol) {
-		case "imap":
-			$emails = imap_search($mailbox,"BEFORE \"".date("d-M-Y",$del_time)."\"");
-		break;
-		case "pop3":
-			// INFO: POP3 may be implemented, but is not supported for now
-			$allmails = imap_fetch_overview($mailbox,"1:*",FT_UID);
-			foreach($allmails as $mail) {
-				if(strtotime($mail->date)<$del_time)
-					$emails[] = $mail->msgno;
-			}
-		break;
-	}
-	if(false && $emails) {
-		foreach($emails as $email_number)
-			imap_delete($mailbox,$email_number);
-		imap_expunge($mailbox);
-	}
+		$del_time = mktime(date("H"),date("i"),date("s"),date("n"),date("j")-$this->purge_age_days,date("Y"));
+		switch($this->protocol) {
+			case "imap":
+				$emails = imap_search($mailbox,"BEFORE \"".date("d-M-Y",$del_time)."\"");
+			break;
+			case "pop3":
+				// INFO: POP3 may be implemented, but is not supported for now
+				$allmails = imap_fetch_overview($mailbox,"1:*",FT_UID);
+				foreach($allmails as $mail) {
+					if(strtotime($mail->date)<$del_time)
+						$emails[] = $mail->msgno;
+				}
+			break;
+		}
+		if($this->debug) error_log("Deleting ".count($emails)." deprecated emails");
+		if(false && $emails) {
+			foreach($emails as $email_number)
+				imap_delete($mailbox,$email_number);
+			imap_expunge($mailbox);
+		}
     }
     /**
 	Reads Attachments from email_structures
@@ -194,15 +213,17 @@ class repository_emailed_files extends repository {
 	@return array of structure indicating which of them are attachments
      */
     private function read_attachments($structure) {
-       $attachments = array();
+    	if($this->debug) error_log("Reading Attachments");
+    	$attachments = array();
         if(isset($structure->parts) && count($structure->parts)) {
+        	if($this->debug) error_log("Structure has ".count($structure->parts)." Parts");
             for($i = 0; $i < count($structure->parts); $i++) {
                 $attachments[$i] = array(
                     'is_attachment' => false,
                     'filename' => '',
                     'name' => '',
                     'attachment' => '',
-		    'bytes' => $structure->parts[$i]->bytes,
+		    		'bytes' => $structure->parts[$i]->bytes,
                 );
  
                 if($structure->parts[$i]->ifdparameters) {
@@ -224,7 +245,8 @@ class repository_emailed_files extends repository {
                 }
             }
         }
-	return $attachments;
+        if($this->debug) error_log("Found ".count($attachments)." Attachments from one eMail");
+		return $attachments;
     }
 
     /**
@@ -243,31 +265,31 @@ class repository_emailed_files extends repository {
         $ref = explode("_",$reference);
         $saveas = $this->prepare_file($saveas);
 
-	$email_number = $ref[0];
-	$structure_number = $ref[1];
+		$email_number = $ref[0];
+		$structure_number = $ref[1];
 
-	$mailbox = $this->connect_mailbox();
-	$structure = imap_fetchstructure($mailbox, $email_number);
+		$mailbox = $this->connect_mailbox();
+		$structure = imap_fetchstructure($mailbox, $email_number);
 	
-        $attachment = imap_fetchbody($mailbox, $email_number, $structure_number+1, FT_PEEK);
+			$attachment = imap_fetchbody($mailbox, $email_number, $structure_number+1, FT_PEEK);
 
-        /* 3 = BASE64 encoding */
-        if($structure->parts[$structure_number]->encoding == 3) { 
-        	$attachment = base64_decode($attachment);
-        }
-        /* 4 = QUOTED-PRINTABLE encoding */
-        if($structure->parts[$structure_number]->encoding == 4) { 
-        	$attachment = quoted_printable_decode($attachment);
-        }
+			/* 3 = BASE64 encoding */
+			if($structure->parts[$structure_number]->encoding == 3) { 
+				$attachment = base64_decode($attachment);
+			}
+			/* 4 = QUOTED-PRINTABLE encoding */
+			if($structure->parts[$structure_number]->encoding == 4) { 
+				$attachment = quoted_printable_decode($attachment);
+			}
 
-	if(strlen($attachment)==0)
-		throw new moodle_exception('cannotdownload', 'repository');
+		if(strlen($attachment)==0)
+			throw new moodle_exception('cannotdownload', 'repository');
 
-	$fp = fopen($saveas, "w+");
-	fwrite($fp, $attachment);
-	fclose($fp);
-	imap_close($mailbox);
-	return array('path'=>$saveas); //, 'url'=>'');
+		$fp = fopen($saveas, "w+");
+		fwrite($fp, $attachment);
+		fclose($fp);
+		imap_close($mailbox);
+		return array('path'=>$saveas); //, 'url'=>'');
     }
     /**
      * Set email option
@@ -275,25 +297,25 @@ class repository_emailed_files extends repository {
      * @return mixed
      */
     public function set_option($options = array()) {
-	$str_values = array('host','protocol','box','user','pass');
-	$int_values = array('port','purge_age_days');
-	$bool_values = array('use_ssl','validate_cert');
+		$str_values = array('host','protocol','box','user','pass');
+		$int_values = array('port','purge_age_days');
+		$bool_values = array('use_ssl','validate_cert');
 
-	for($i=0;$i<count($str_values);$i++) {
-		if(!empty($options[$str_values[$i]]))
-			set_config($str_values[$i],trim($options[$str_values[$i]]),'emailed_files');
-		unset($options[$str_values[$i]]);
-	}
-	for($i=0;$i<count($int_values);$i++) {
-		if(!empty($options[$int_values[$i]]))
-			set_config($int_values[$i],(int)trim($options[$int_values[$i]]),'emailed_files');
-		unset($options[$int_values[$i]]);
-	}
-	for($i=0;$i<count($bool_values);$i++) {
-		if(false && !empty($options[$bool_values[$i]]))
-			set_config($bool_values[$i],trim($options[$bool_values[$i]]),'emailed_files');
-		unset($options[$bool_values[$i]]);
-	}
+		for($i=0;$i<count($str_values);$i++) {
+			if(!empty($options[$str_values[$i]]))
+				set_config($str_values[$i],trim($options[$str_values[$i]]),'emailed_files');
+			unset($options[$str_values[$i]]);
+		}
+		for($i=0;$i<count($int_values);$i++) {
+			if(!empty($options[$int_values[$i]]))
+				set_config($int_values[$i],(int)trim($options[$int_values[$i]]),'emailed_files');
+			unset($options[$int_values[$i]]);
+		}
+		for($i=0;$i<count($bool_values);$i++) {
+			if(false && !empty($options[$bool_values[$i]]))
+				set_config($bool_values[$i],trim($options[$bool_values[$i]]),'emailed_files');
+			unset($options[$bool_values[$i]]);
+		}
         $ret = parent::set_option($options);
         return $ret;
     }
