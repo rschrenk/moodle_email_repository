@@ -42,7 +42,7 @@ class repository_emailed_files extends repository {
         global $CFG;
         parent::__construct($repositoryid, $context, $options);
         
-        $this->debug = true;
+        $this->debug = false;
         
         if($this->debug) error_log("Construct");
 
