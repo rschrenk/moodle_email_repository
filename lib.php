@@ -107,7 +107,8 @@ class repository_emailed_files extends repository {
 			for($i=0;$i<count($emails);$i++) {
 				$email_number = $emails[$i];			
 				$overview = imap_fetch_overview($mailbox,$email_number,0);
-			
+				if($overview[0]->subject=="")
+					$overview[0]->subject = "Empty Subject";
 				$structure = imap_fetchstructure($mailbox, $email_number);
 				if($this->debug) error_log("   - Structure ".$email_number);
 			
