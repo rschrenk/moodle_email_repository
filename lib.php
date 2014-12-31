@@ -30,6 +30,7 @@ $CFG->debugdisplay = true;   // NOT FOR PRODUCTION SERVERS!
  * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  * @todo       exceptions, pop3-support, inline-attachments
  */
+
 class repository_emailed_files extends repository {
     /**
      * Constructor of emailed_files plugin
@@ -81,41 +82,54 @@ class repository_emailed_files extends repository {
     /**
      * Get emailed files
      *
-     * @param string $path not used by emailed repository
+     * @param string $filterpath is email_number to open
      * @param int $page page number for pagination
      * @return array list of files
      */
-    public function get_listing($path = '', $page = '1') {
+    public function get_listing($filterpath = '', $page = '1') {
 		$mailbox = $this->connect_mailbox();
 
 		$this->find_emails_for_deletion($mailbox);
 		$emails = $this->find_emails_of_user($mailbox);
-		$files = array();
 		
-		if($this->debug) error_log("Checking ".count($emails)." Emails for Attachments");
+		$list = array();
+		
+		$list['list'] = array();
+		$list['path'] = array();
+		$list['path'][0] = new stdClass;
+		$list['path'][0]->name = "root";
+		$list['path'][0]->path = "";
+		$list['manage'] = '';
 
 		if(count($emails)>0) {
 			rsort($emails);
-			for($i=0;$i<count($emails);$i++) {
-				$email_number = $emails[$i];
-				$overview = imap_fetch_overview($mailbox,$email_number,0);
-				$subject = $overview[0]->subject;
-				$date = $overview[0]->date;
 
+			for($i=0;$i<count($emails);$i++) {
+				$email_number = $emails[$i];			
+				$overview = imap_fetch_overview($mailbox,$email_number,0);
+			
 				$structure = imap_fetchstructure($mailbox, $email_number);
-				$attachments = $this->read_attachments($structure);
-				if($this->debug) error_log("Structure has ".count($attachments)." Attachments");
+				if($this->debug) error_log("   - Structure ".$email_number);
+			
+				$attachments = $this->read_object($structure);
 				if(count($attachments)>0) {
-					for($y=0;$y<count($attachments);$y++) {
-						if($attachments[$y]['is_attachment']) {
-							$z = count($files);
-							$files[$z]["email_number"] = $email_number;
-							$files[$z]["structure_number"] = $y;
-							$files[$z]["subject"] = $subject;
-							$files[$z]["date"] = $date;
-							$files[$z]["size"] = $attachments[$y]["bytes"];
-							$files[$z]["filename"] = $attachments[$y]["filename"];
+					$path = new stdClass; $path->name = $overview[0]->subject;
+					$path->path = $email_number;
+					$list['path'][] = $path;
+					
+					if($filterpath==$email_number) 
+						$list['list'] = $attachments;
+					elseif($filterpath=='') {
+						$folder = new stdClass; $folder->title = $overview[0]->subject;
+						$folder->date = strtotime($overview[0]->date); $folder->size = 0;
+						$folder->children = array();
+
+						for($z=0;$z<count($attachments);$z++) {
+							$attachments[$z]->date = $folder->date;
+							$folder->size = $folder->size+$attachments[$z]->size;
+							$folder->children[] = $attachments[$z];
 						}
+						$list['list'][] = $folder;
 					}
 				}
 			}
@@ -124,31 +138,6 @@ class repository_emailed_files extends repository {
 			imap_close($mailbox);
 			return false;
 		}
-		
-		if($this->debug) error_log("In total ".count($files)." Attachments found");
-
-        $dirslist = array();
-        $fileslist = array();
-        foreach ($files as $file) {
-        	$thumbnail = null;
-		$title_ = imap_mime_header_decode($file["filename"]);
-		$title = "";
-		foreach($title_ as $t)
-			$title .= $t->text;
-        	$fileslist[] = array(
-        		'title' => $title,
-        		'source' => $file["email_number"]."_".$file["structure_number"],
-        		'size' => $file["size"],
-        		'date' => strtotime($file["date"]),
-        		'thumbnail' => null, // $OUTPUT->pix_url(file_extension_icon($file->path, 64))->out(false),
-        		'realthumbnail' => $thumbnail,
-        		'thumbnail_height' => 64,
-        		'thumbnail_width' => 64,
-			'author' => $GLOBALS["USER"]->email,
-        	);
-        }
-        $fileslist = array_filter($fileslist, array($this, 'filter'));
-        $list['list'] = array_merge($dirslist, array_values($fileslist));
         return $list;
     }
 
@@ -173,7 +162,10 @@ class repository_emailed_files extends repository {
 				}
 			break;
 		}
-		if($this->debug) error_log("Found ".count($emails)." Emails of user");
+		if($this->debug) {
+			if(!$emails) error_log("NO Emails for ".$USER->email." found");
+			else error_log("Found ".count($emails)." Emails for user ".$USER->email);
+		}
 		return $emails;	
     }
     /**
@@ -200,61 +192,145 @@ class repository_emailed_files extends repository {
 				}
 			break;
 		}
-		if($this->debug) error_log("Deleting ".count($emails)." deprecated emails");
-		if(false && $emails) {
+		if(!$emails) {
+			// imap_search returns false if no results
+			if($this->debug) error_log("No deprecated emails to delete");
+			return;
+		}
+		if(count($emails)>0) {
+			if($this->debug) error_log("Deleting ".count($emails)." deprecated emails");
 			foreach($emails as $email_number)
 				imap_delete($mailbox,$email_number);
 			imap_expunge($mailbox);
 		}
     }
     /**
-	Reads Attachments from email_structures
-	@param object $structure imap_fetchstructure result for specific email
-	@return array of structure indicating which of them are attachments
-     */
-    private function read_attachments($structure) {
-    	if($this->debug) error_log("Reading Attachments");
+    ** @param o email structure to search within, if attachments are found they
+    **			are collected in an array and are given the imap section number
+    **			according to imap specification
+    ** @return	array containing attachment-objects
+    */
+    private function read_object($o) {
     	$attachments = array();
-        if(isset($structure->parts) && count($structure->parts)) {
-        	if($this->debug) error_log("Structure has ".count($structure->parts)." Parts");
-            for($i = 0; $i < count($structure->parts); $i++) {
-                $attachments[$i] = array(
-                    'is_attachment' => false,
-                    'filename' => '',
-                    'name' => '',
-                    'attachment' => '',
-		    		'bytes' => $structure->parts[$i]->bytes,
-                );
- 
-                if($structure->parts[$i]->ifdparameters) {
-                    foreach($structure->parts[$i]->dparameters as $object) {
-                        if(strtolower($object->attribute) == 'filename') {
-                            $attachments[$i]['is_attachment'] = true;
-                            $attachments[$i]['filename'] = $object->value;
-                        }
-                    }
-                }
- 
-                if($structure->parts[$i]->ifparameters) {
-                    foreach($structure->parts[$i]->parameters as $object) {
-                        if(strtolower($object->attribute) == 'name') {
-                            $attachments[$i]['is_attachment'] = true;
-                            $attachments[$i]['filename'] = $object->value;
-                        }
-                    }
-                }
-            }
-        }
-        if($this->debug) error_log("Found ".count($attachments)." Attachments from one eMail");
-		return $attachments;
+    	if(isset($o->parts)) {
+    		if(isset($o->parts[1])) {
+    			if(isset($o->parts[1]->parts)) {
+					$nr = 2;
+					foreach($o->parts[1]->parts AS $part) {
+						$a = $this->read_part($part);
+						if($a!=null) {
+							$a->source = $mailnr."_2.".$nr++."_".$part->encoding;
+							$attachments[] = $a;
+						}
+					}
+    			} else {
+					$nr = 2;
+					foreach($o->parts AS $part) {
+						$a = $this->read_part($part);
+						if($a!=null) {
+							$a->source = $mailnr."_".$nr++."_".$part->encoding;
+							$attachments[] = $a;
+						}
+					}
+    			}
+    		}
+    	}
+    	return $attachments;
     }
+    
+    /**
+    ** @param object part	Message-Part Object containing the information 
+    **						of an attachment
+    ** @return object for attachment or null
+    **/
+	private function read_part($part) {
+		$att = new stdClass;
+		$att->title = '';
+		$att->size = $part->bytes;
+		$att->thumbnail = null;
+		$att->realthumbnail = null;
+		$att->thumbnail_height = 64;
+		$att->thumbnail_width = 64;
+		$att->author = $GLOBALS["USER"]->email;
+
+		if($part->ifdparameters)
+			foreach($part->dparameters as $param)
+				if(strtolower($param->attribute)=='filename') {
+					$att->title = $param->value;
+				}
+		if($part->ifparameters)
+			foreach($part->parameters as $param)
+				if(strtolower($param->attribute)=='name') {
+					$att->title = $param->value;
+				}				
+
+		if($att->title!="") {
+			if($this->debug) error_log("      - Attachment found ".$att->title);
+			return $att;
+		} else return null;
+	}
+    
+    /*
+    error_log(print_r($o,1));
+    return;
+    	if(isset($o->subtype)) {
+			if($this->debug) error_log("      - Type is ".$o->subtype);
+			switch(strtolower($o->subtype)) {
+				case "alternative":
+				case "mixed":
+					// Search for sub-parts
+					if($this->debug) error_log("     - Type mixed / alternative, going deeper");
+					$this->read_object($o->parts);
+				break;
+				default:
+					if($this->debug) error_log("     - Part to search for attachments");
+					$part = $o;
+					// Analyze part of this object
+					$att = array();
+					$att['is_attachment'] = false;
+					$att['filename'] = '';
+					$att['name'] = '';
+					$att['attachment'] = '';
+					$att['structure_number'] = ''; // 2 or 2.3
+					$att['bytes'] = $part->bytes;
+		
+					if($part->ifdparameters)
+						foreach($part->dparameters as $param)
+							if(strtolower($param->attribute)=='filename') {
+								$att['is_attachment'] = true;
+								$att['filename'] = $param->value;
+							}
+					if($part->ifparameters)
+						foreach($part->parameters as $param)
+							if(strtolower($param->attribute)=='name') {
+								$att['is_attachment'] = true;
+								$att['filename'] = $param->value;
+							}				
+
+					if($att["is_attachment"]) {
+						if($this->debug) error_log("      - Attachment found ".$att["filename"]);
+						//.print_r($att,true));
+						$this->attachments[] = $att;
+					} else if($this->debug) error_log("      - No Attachment");
+					if(isset($o->parts)) {
+						if($this->debug) error_log("      - There are still sub-parts - going deeper");
+						$this->read_object($o->parts);
+					}
+			}
+		} else {
+			if($this->debug) error_log("     - Looping through ".count($o)." items");
+			for($i=0;$i<count($o);$i++)
+				$this->read_object($o[$i]);
+		}
+		*/
+    //}   
 
     /**
      * Downloads a file from external repository and saves it in temp dir
      *
      * @throws moodle_exception when file could not be downloaded
      *
-     * @param string $reference containing emailnumber + _ + structurenumber
+     * @param string $reference containing emailnumber + _ + structurenumber + _ + encoding
      * @param string $saveas filename (without path) to save the downloaded file in the
      * temporary directory, if omitted or file already exists the new filename will be generated
      * @return array with elements:
@@ -267,20 +343,24 @@ class repository_emailed_files extends repository {
 
 		$email_number = $ref[0];
 		$structure_number = $ref[1];
+		$encoding = $ref[2];
 
 		$mailbox = $this->connect_mailbox();
 		$structure = imap_fetchstructure($mailbox, $email_number);
-	
-			$attachment = imap_fetchbody($mailbox, $email_number, $structure_number+1, FT_PEEK);
+		//$this->read_object($structure);
+		
+		if($this->debug) error_log("     - Reading Mail#".$email_number.", Part ".$structure_number);
+		//error_log(print_r($structure,1));
+		$attachment = imap_fetchbody($mailbox, $email_number, $structure_number, FT_PEEK);
 
-			/* 3 = BASE64 encoding */
-			if($structure->parts[$structure_number]->encoding == 3) { 
-				$attachment = base64_decode($attachment);
-			}
-			/* 4 = QUOTED-PRINTABLE encoding */
-			if($structure->parts[$structure_number]->encoding == 4) { 
-				$attachment = quoted_printable_decode($attachment);
-			}
+		/* 3 = BASE64 encoding */
+		if($encoding == 3) { 
+			$attachment = base64_decode($attachment);
+		}
+		/* 4 = QUOTED-PRINTABLE encoding */
+		if($encoding == 4) { 
+			$attachment = quoted_printable_decode($attachment);
+		}
 
 		if(strlen($attachment)==0)
 			throw new moodle_exception('cannotdownload', 'repository');
@@ -289,6 +369,7 @@ class repository_emailed_files extends repository {
 		fwrite($fp, $attachment);
 		fclose($fp);
 		imap_close($mailbox);
+		if($this->debug) error_log("     - Downloaded size: ".strlen($attachment));
 		return array('path'=>$saveas); //, 'url'=>'');
     }
     /**
@@ -328,31 +409,31 @@ class repository_emailed_files extends repository {
     public static function type_config_form($mform, $classname = 'repository') {
         global $CFG;
         parent::type_config_form($mform);
-	$lang = 'repository_emailed_files';
+		$lang = 'repository_emailed_files';
 
         $strrequired = get_string('required');
 
-	$values = array('host','port','protocol','box','user','pass','use_ssl','validate_cert','purge_age_days');
-	$bools = array('use_ssl','validate_cert');
-	$nums = array('port','purge_age_days');
-	$sels = array('protocol');
+		$values = array('host','port','protocol','box','user','pass','use_ssl','validate_cert','purge_age_days');
+		$bools = array('use_ssl','validate_cert');
+		$nums = array('port','purge_age_days');
+		$sels = array('protocol');
 
-	for($i=0;$i<count($values);$i++) {
-		$id = $values[$i];
-		$v[$id] = get_config('emailed_files',$values[$i]);
-		$type[$id] = 'text';
-		if(@in_array($values[$i],$bools)) {
-			$type[$id] = 'advcheckbox';
-			$v[$id] = ($v[$id])?'1':'0';
+		for($i=0;$i<count($values);$i++) {
+			$id = $values[$i];
+			$v[$id] = get_config('emailed_files',$values[$i]);
+			$type[$id] = 'text';
+			if(@in_array($values[$i],$bools)) {
+				$type[$id] = 'advcheckbox';
+				$v[$id] = ($v[$id])?'1':'0';
+			}
+			if(@in_array($values[$i],$nums)) $type[$id] = 'text';
+			if(@in_array($values[$i],$sels)) $type[$id] = 'select';
+			$info[$id] = get_string($id,'repository_emailed_files');
 		}
-		if(@in_array($values[$i],$nums)) $type[$id] = 'text';
-		if(@in_array($values[$i],$sels)) $type[$id] = 'select';
-		$info[$id] = get_string($id,'repository_emailed_files');
-	}
         $mform->addElement($type['host'], 'host', $info['host'], array('value'=>$v['host'],'size' => '20'));
         $mform->addElement($type['port'], 'port', $info['port'], array('value'=>$v['port'],'size' => '4'));
 
-	// Enable this if you want to support different protocols. POP3 would be possible, but is not implemented yet
+		// Enable this if you want to support different protocols. POP3 would be possible, but is not implemented yet
         //$s = $mform->addElement($type['protocol'], 'protocol', $info['protocol'], array('imap'=>'imap','pop3'=>'pop3'));
         //$s->setSelected($v['protocol']);
         $mform->addElement($type['box'], 'box', $info['box'], array('value'=>$v['box'],'size' => '10'));
@@ -362,15 +443,13 @@ class repository_emailed_files extends repository {
         $mform->addElement($type['validate_cert'], 'validate_cert', $info['validate_cert'], $v['validate_cert']);
         $mform->addElement($type['purge_age_days'], 'purge_age_days', $info['purge_age_days'], array('value'=>$v['purge_age_days'],'size'=>'2'));
 
-	for($i=0;$i<count($values);$i++)
-	       	$mform->setType($values[$i], PARAM_TEXT);
-
+		for($i=0;$i<count($values);$i++)
+			$mform->setType($values[$i], PARAM_TEXT);
        	$mform->setType('port', PARAM_INT);
        	$mform->setType('purge_age_days', PARAM_INT);
        	$mform->setType('use_ssl', PARAM_BOOL);
        	$mform->setType('validate_cert', PARAM_BOOL);
-	
-	$mform->setDefault('purge_age_days',0);
+		$mform->setDefault('purge_age_days',0);
     }
 
     /**
